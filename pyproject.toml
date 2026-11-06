@@ -1,0 +1,48 @@
+[build-system]
+requires = ["uv_build>=0.11.0,<0.12.0"]
+build-backend = "uv_build"
+
+[project]
+name = "ema-scheduler-redcap"
+version = "2026.11.3"
+description = "An EMA scheduler meant to setup scheduler for REDCap integration"
+requires-python = ">=3.11"
+dependencies = [
+    "docopt-ng>=0.9.0",
+    "pandas>=3.0.6",
+    "pyyaml>=6.0.3",
+    "redcap-toolbox @ https://github.com/uwmadison-chm/redcap-toolbox/archive/181ab58765afffd1584e3d41f1998d238b57a536.zip",
+]
+license = "MIT"
+authors = [
+    { name="Nate Vack", email="njvack@wisc.edu"},
+    { name="Stuti Shrivastava", email="sshrivastav6@wisc.edu" },
+]
+maintainers = [
+    { name="Nate Vack", email="njvack@wisc.edu"},
+    { name="Stuti Shrivastava", email="sshrivastav6@wisc.edu" },
+]
+readme = "README.md"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Natural Language :: English",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+]
+
+[project.scripts]
+ema-populate = "ema_scheduler_redcap.ema_populate_redcap:cli"
+ema-gen = "ema_scheduler_redcap.ema_gen:cli"
+
+[dependency-groups]
+dev = [
+    "pluggy>=1.6.0",
+    "pytest>=8.4.1",
+    "ruff>=0.12.2",
+    "rust-just>=1.53.0",
+    "ty>=0.0.2",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

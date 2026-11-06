@@ -1,0 +1,42 @@
+# Settings used only by test_ema_populate_redcap.py. It is not the project's real
+# config, so editing config/ema_config.yaml never affects the tests. The tests read
+# column names, event names and settings from this file, so you can rename them here.
+#
+# Two events with only what matters for scheduling:
+#   int_ema_arm_1   start = rand_date + 1 day, 7 days
+#   post_ema_arm_1  start = invite_date_post + 0 days, 3 days
+
+id_field: webscreen_id
+sample_time_field: ema_deliver_at
+
+central_tz: America/Chicago          # REDCap's own time zone
+timezone_field: scr_tz_offset_min
+state_field: trk_state_actual
+
+timezones:                           # REDCap code -> IANA zone
+  -60: America/New_York
+  0:   America/Chicago
+  60:  America/Denver
+
+no_dst_overrides:                    # a state that ignores DST inside a zone that uses it
+  - { zone_code: 60, state: AZ, iana: America/Phoenix }
+
+defaults:
+  day_field: ema_day_num
+  start_time_field: trk_ema_start_time
+  start_offset_days: 1
+  max_days_before_start: 3
+  max_days_after_start: 0
+  samples_per_day: 4
+  sampling_min: 720
+  gap_min: 60
+  max_iters: 1000
+  filters:
+    - { field: redcap_event_name,     op: equals, value: scr_arm_1 }
+    - { field: trk_enrollment_status, op: equals, value: enrolled }
+    - { field: trk_withdrawal,         op: equals, value: 0 }
+    - { field: trk_ema_start_time,    op: not_blank }
+
+events:
+  int_ema_arm_1:  { start_date_field: rand_date,        days: 7 }
+  post_ema_arm_1: { start_date_field: invite_date_post, days: 3, start_offset_days: 0 }
