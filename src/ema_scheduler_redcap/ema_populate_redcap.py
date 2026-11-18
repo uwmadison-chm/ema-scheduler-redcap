@@ -4,15 +4,16 @@
 Create EMA schedules for participants who are due one.
 
 Reads the screening CSV and one EMA CSV per event (no REDCap access) and writes
-one REDCap import CSV per event, ready to upload with update_redcap. Each event's EMA
-file is looked for in the same folder as the screening CSV; the file names are in the config.
+one REDCap import CSV per event, ready to upload with update_redcap. Each event's
+EMA file is looked for in the same folder as the screening CSV; the file names
+are in the config. Output directory is expected to exist.
 
 For each event, a participant is scheduled if they pass the filters, have a
 start date, are not already in that event's EMA file, and the start date
 (start date field + offset) is inside the allowed window.
 
 Usage:
-  populate_redcap_ema.py [options] <scr_csv> <config_yaml>
+  populate_redcap_ema.py [options] <scr_csv> <config_yaml> <output_dir>
 
 Options:
   --first-run         The EMA files may be missing or empty (nobody scheduled yet)
@@ -74,6 +75,24 @@ def load_config(path):
         for o in raw.get("no_dst_overrides", [])
     }
     return cfg
+
+
+def output_name(ev):
+    """File name of one event's import file, from the event's `output_csv` pattern.
+
+    The pattern may use {ema_csv_name} (the event's ema_csv without .csv).
+    It is only a file name; the folder comes from the command line.
+    """
+    pattern = ev["output_csv"]
+    try:
+        name = pattern.format(ema_csv_name=Path(ev["ema_csv"]).stem)
+    except (KeyError, IndexError, ValueError) as e:
+        raise ValueError(
+            f"output_csv {pattern!r}: only {{ema_csv_name}} can be used") from e
+    if Path(name).name != name:
+        raise ValueError(
+            f"output_csv {pattern!r} must be a file name, not a path (the folder is given on the command line)")
+    return name
 
 
 def participant_zone(row, cfg):
@@ -159,9 +178,14 @@ def schedule_event(todo, ev, cfg, today):
     return rows, counts
 
 
-def main(scr_csv, cfg_yaml, first_run=False, dry_run=False, today=None, now=None):
+def main(scr_csv, cfg_yaml, out_dir, first_run=False, dry_run=False, today=None, now=None):
     """Returns {event_name: path of the import file written}."""
     today, now = today or date.today(), now or datetime.now()
+
+    out_dir = Path(out_dir)
+    if not dry_run and not out_dir.is_dir():
+        raise NotADirectoryError(f"Output directory does not exist: {out_dir}")
+
     cfg = load_config(cfg_yaml)
     id_field = cfg["id_field"]
     scr_df = read_csv_file(scr_csv)
@@ -178,9 +202,10 @@ def main(scr_csv, cfg_yaml, first_run=False, dry_run=False, today=None, now=None
             },
             "scr",
         )
+        # EMA input files are assumed to have the same scr file path
         ema_path = (
             Path(scr_csv).parent / ev["ema_csv"]
-        )  # same folder as the screening CSV
+        )
         ema_df = read_ema_csv(ema_path, id_field, first_run=first_run)
         done = already_scheduled_ids(ema_df, name, id_field)
         other = sorted(set(ema_df[EVENT_FIELD]) - {name})
@@ -203,13 +228,12 @@ def main(scr_csv, cfg_yaml, first_run=False, dry_run=False, today=None, now=None
             + ", ".join(f"{n} {len(r)} rows" for n, r in rows_by_event.items())
         )
         return written
-    stamp = now.strftime(
-        "%Y%m%d_%H%M%S"
-    )  # all rows are generated first, so a failure writes nothing
+
+    file_names = {name: output_name(ev) for name, ev in cfg["events"].items()}
+
     for name, rows in rows_by_event.items():
-        out = write_csv_file(
-            rows, cfg["events"][name]["output_csv"].replace("{timestamp}", stamp)
-        )
+        out = write_csv_file(rows, out_dir.joinpath(file_names[name]))
+
         if out:
             written[name] = out
             logger.info(f"{name}: wrote {len(rows)} rows to {out}")
@@ -235,6 +259,7 @@ def cli():
     main(
         args["<scr_csv>"],
         args["<config_yaml>"],
+        args["<output_dir>"],
         args["--first-run"],
         args["--dry-run"],
         today,

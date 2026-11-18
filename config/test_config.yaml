@@ -38,5 +38,15 @@ defaults:
     - { field: trk_ema_start_time,    op: not_blank }
 
 events:
-  int_ema_arm_1:  { start_date_field: rand_date,        days: 7 }
-  post_ema_arm_1: { start_date_field: invite_date_post, days: 3, start_offset_days: 0 }
+  int_ema_arm_1:
+    start_date_field: rand_date
+    days: 7
+    ema_csv: redcap__int_ema.csv
+    output_csv: redcap__int_ema_cache.csv
+
+  post_ema_arm_1:
+    start_date_field: invite_date_post
+    days: 3
+    start_offset_days: 0
+    ema_csv: redcap__post_ema.csv
+    output_csv: redcap__post_ema_cache.csv

@@ -19,4 +19,5 @@ cd "${OUT_DIR}"
 echo "Populating REDCap EMA"
 python -m ema_scheduler_redcap.ema_populate_redcap -v "$@" \
     "${DATA_DIR}/redcap__scr.csv" \
-    "${CONFIG_DIR}/ema_config.yaml"
+    "${CONFIG_DIR}/ema_config.yaml" \
+    "${OUT_DIR}"

@@ -105,11 +105,10 @@ def scr(rows):
 
 
 def write_config(d):
-    """Write the test config into folder d, adding per-event EMA file names and output paths."""
+    """Write the test config into folder d, adding per-event EMA file names."""
     cfg = copy.deepcopy(TEST_CONFIG)
     for name, ev in cfg["events"].items():
-        ev["ema_csv"] = f"ema_{name}.csv"  # a bare name: found next to scr.csv
-        ev["output_csv"] = os.path.join(d, "out", f"import_{name}_{{timestamp}}.csv")
+        ev["ema_csv"] = f"ema_{name}.csv"
     path = os.path.join(d, "cfg.yaml")
     with open(path, "w") as f:
         yaml.safe_dump(cfg, f)
@@ -124,7 +123,9 @@ def run(scr_df, ema=None, first_run=False, today=TODAY):
             with open(os.path.join(d, f"ema_{name}.csv"), "w") as f:
                 f.write(text)
         scr_df.to_csv(s, index=False)
-        written = p.main(s, cfg_path, first_run=first_run, today=today)
+        out = os.path.join(d, "out")
+        os.mkdir(out)
+        written = p.main(s, cfg_path, out_dir=out, first_run=first_run, today=today)
         return {
             name: pd.read_csv(path, dtype=str, na_filter=False)
             for name, path in written.items()
@@ -299,8 +300,17 @@ def test_dry_run_writes_nothing():
     with tempfile.TemporaryDirectory() as d:
         cfg_path, s_path = write_config(d), os.path.join(d, "scr.csv")
         scr([{ID: "1", INT_DATE: "2026-11-01"}]).to_csv(s_path, index=False)
-        assert p.main(s_path, cfg_path, first_run=True, dry_run=True, today=TODAY) == {}
+        out = os.path.join(d, "out")
+        assert p.main(s_path, cfg_path, out_dir=out, first_run=True, dry_run=True, today=TODAY) == {}
         assert not os.path.exists(os.path.join(d, "out"))
+
+
+def test_missing_output_folder_raises():
+    with tempfile.TemporaryDirectory() as d:
+        cfg_path, s_path = write_config(d), os.path.join(d, "scr.csv")
+        scr([{ID: "1", INT_DATE: "2026-11-01"}]).to_csv(s_path, index=False)
+        with pytest.raises(NotADirectoryError):
+            p.main(s_path, cfg_path, os.path.join(d, "nope"), first_run=True, today=TODAY)
 
 
 def test_real_config_has_everything_the_code_needs():

@@ -57,5 +57,5 @@ def write_csv_file(rows: pd.DataFrame | list[dict], path: str | Path) -> Path | 
         return None
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(path, index=False, mode="x")
+    df.to_csv(path, index=False)
     return path
