@@ -1,18 +1,18 @@
-#!/usr/env/bin python
+#!/usr/bin/env python
+
+"""Tests for the CSV helpers (reading the screening and EMA files, writing the import file)."""
 
 import logging
-import os
 import subprocess
 import sys
-import tempfile
 
 import pandas as pd
-from pandas.errors import EmptyDataError
+import pytest
+from pandas.errors import EmptyDataError, ParserError
 
 from ema_scheduler_redcap import ema_helper as helper
 from ema_scheduler_redcap import ema_select as sel
 
-HERE = os.path.dirname(os.path.abspath(__file__))
 EMA_COLS = [
     "webscreen_id",
     "redcap_event_name",
@@ -39,163 +39,135 @@ ROWS = [
         "ema_deliver_at": "2026-11-03 09:05:00",
     },
 ]
+MALFORMED = "a,b\n1,2\n1,2,3,4\n"  # the second data row has too many fields
 
 
-def _write(d, name, text):
-    path = os.path.join(d, name)
-    with open(path, "w") as f:
-        f.write(text)
-    return path
+@pytest.fixture
+def make_csv(tmp_path):
+    """make_csv(name, text) -> path of a new file with that text, in this test's own folder."""
 
+    def _make(name, text):
+        path = tmp_path / name
+        path.write_text(text)
+        return path
 
-def _raises(exc, fn, *args, **kw):
-    try:
-        fn(*args, **kw)
-    except exc:
-        return
-    raise AssertionError(f"expected {exc.__name__}")
-
-
-class _Catch(logging.Handler):
-    def __init__(self):
-        super().__init__()
-        self.msgs = []
-
-    def emit(self, record):
-        self.msgs.append(record.getMessage())
+    return _make
 
 
 # ---- reading
-def test_read_keeps_text_and_blanks():
-    with tempfile.TemporaryDirectory() as d:
-        df = helper.read_csv_file(_write(d, "a.csv", "id,when\n007,\n008,2026-01-01\n"))
-        assert list(df["id"]) == ["007", "008"]  # leading zeros survive
-        assert list(df["when"]) == ["", "2026-01-01"]  # blank is "", not NaN
+def test_read_keeps_text_and_blanks(make_csv):
+    df = helper.read_csv_file(make_csv("a.csv", "id,when\n007,\n008,2026-01-01\n"))
+    assert list(df["id"]) == ["007", "008"]  # leading zeros survive
+    assert list(df["when"]) == ["", "2026-01-01"]  # blank is "", not NaN
 
 
-def test_read_header_only_is_fine():
-    with tempfile.TemporaryDirectory() as d:
-        df = helper.read_csv_file(_write(d, "a.csv", "id,redcap_event_name\n"))
-        assert df.empty and list(df.columns) == ["id", "redcap_event_name"]
+def test_read_header_only_is_fine(make_csv):
+    df = helper.read_csv_file(make_csv("a.csv", "id,redcap_event_name\n"))
+    assert df.empty and list(df.columns) == ["id", "redcap_event_name"]
 
 
-def test_read_missing_empty_and_malformed_files_raise():
-    with tempfile.TemporaryDirectory() as d:
-        _raises(FileNotFoundError, helper.read_csv_file, os.path.join(d, "nope.csv"))
-        _raises(EmptyDataError, helper.read_csv_file, _write(d, "empty.csv", ""))
-        _raises(
-            pd.errors.ParserError,
-            helper.read_csv_file,
-            _write(d, "bad.csv", "a,b\n1,2\n1,2,3,4\n"),
-        )
+@pytest.mark.parametrize(
+    ("text", "error"),
+    [(None, FileNotFoundError), ("", EmptyDataError), (MALFORMED, ParserError)],
+    ids=["missing", "empty", "malformed"],
+)
+def test_read_bad_files_raise(tmp_path, text, error):
+    path = tmp_path / "x.csv"
+    if text is not None:  # None means the file does not exist
+        path.write_text(text)
+    with pytest.raises(error):
+        helper.read_csv_file(path)
 
 
-# ---- EMA file and --first-run
-def test_ema_missing_or_empty_raises_by_default():
-    with tempfile.TemporaryDirectory() as d:
-        _raises(
-            FileNotFoundError,
-            helper.read_ema_csv,
-            os.path.join(d, "nope.csv"),
-            "webscreen_id",
-        )
-        _raises(
-            EmptyDataError,
-            helper.read_ema_csv,
-            _write(d, "empty.csv", ""),
-            "webscreen_id",
-            0,
-        )
+# ---- EMA file
+@pytest.mark.parametrize("text", [None, ""], ids=["missing", "empty"])
+def test_ema_missing_or_empty_gives_an_empty_frame_and_a_warning(
+    tmp_path, caplog, text
+):
+    path = tmp_path / "ema.csv"
+    if text is not None:  # None means the file does not exist
+        path.write_text(text)
+    with caplog.at_level(logging.WARNING, logger=helper.logger.name):
+        df = helper.read_ema_csv(path, "webscreen_id")
+    assert df.empty and list(df.columns) == EMA_COLS
+    # the selection code sees it as "nobody scheduled yet"
+    assert sel.already_scheduled_ids(df, "int_ema_arm_1", "webscreen_id") == set()
+    assert len(caplog.records) == 1
+    assert "EMA file missing or empty" in caplog.messages[0]
 
 
-def test_first_run_accepts_missing_and_empty_ema_file():
-    with tempfile.TemporaryDirectory() as d:
-        catch = _Catch()
-        helper.logger.addHandler(catch)
-        try:
-            for path in (os.path.join(d, "nope.csv"), _write(d, "empty.csv", "")):
-                df = helper.read_ema_csv(path, "webscreen_id", first_run=True)
-                assert df.empty and list(df.columns) == EMA_COLS
-                # the selection code sees it as "nobody scheduled yet"
-                assert (
-                    sel.already_scheduled_ids(df, "int_ema_arm_1", "webscreen_id")
-                    == set()
-                )
-        finally:
-            helper.logger.removeHandler(catch)
-        assert len(catch.msgs) == 2 and all("--first-run" in m for m in catch.msgs)
+def test_ema_unparsable_file_still_raises(make_csv):
+    with pytest.raises(ParserError):
+        helper.read_ema_csv(make_csv("bad.csv", MALFORMED), "webscreen_id")
 
 
-def test_first_run_does_not_hide_an_unparsable_file_or_real_data():
-    with tempfile.TemporaryDirectory() as d:
-        _raises(
-            pd.errors.ParserError,
-            helper.read_ema_csv,
-            _write(d, "bad.csv", "a,b\n1,2\n1,2,3,4\n"),
-            "webscreen_id",
-            first_run=True,
-        )
-        path = _write(d, "a.csv", ",".join(EMA_COLS) + "\n1,int_ema_arm_1,,1\n")
-        assert len(helper.read_ema_csv(path, "webscreen_id", first_run=True)) == 1
+def test_ema_file_with_data_is_read_without_a_warning(make_csv, caplog):
+    path = make_csv("a.csv", ",".join(EMA_COLS) + "\n1,int_ema_arm_1,,1\n")
+    with caplog.at_level(logging.WARNING, logger=helper.logger.name):
+        df = helper.read_ema_csv(path, "webscreen_id")
+    assert len(df) == 1
+    assert not caplog.records
 
 
 # ---- writing
-def test_write_all_rows_in_one_file_and_create_folder():
-    with tempfile.TemporaryDirectory() as d:
-        path = helper.write_csv_file(ROWS, os.path.join(d, "new", "dir", "out.csv"))
-        assert path is not None
-        back = pd.read_csv(path, dtype=str)
-        assert len(back) == 3 and list(back["id"]) == ["1", "1", "2"]
+def test_write_all_rows_in_one_file_and_create_folder(tmp_path):
+    target = tmp_path / "new" / "dir" / "out.csv"
+    assert helper.write_csv_file(ROWS, target) == target  # returns the path it wrote
+    back = pd.read_csv(target, dtype=str)
+    assert len(back) == 3 and list(back["id"]) == ["1", "1", "2"]
 
 
-def test_write_accepts_a_dataframe():
-    with tempfile.TemporaryDirectory() as d:
-        out = helper.write_csv_file(pd.DataFrame(ROWS), os.path.join(d, "out.csv"))
-        assert out is not None
-        assert len(pd.read_csv(out)) == 3
+def test_write_accepts_a_dataframe(tmp_path):
+    target = tmp_path / "out.csv"
+    assert helper.write_csv_file(pd.DataFrame(ROWS), target) == target
+    assert len(pd.read_csv(target)) == 3
 
 
-def test_write_nothing_creates_no_file():
-    with tempfile.TemporaryDirectory() as d:
-        target = os.path.join(d, "out.csv")
-        assert helper.write_csv_file([], target) is None
-        assert not os.path.exists(target)
+def test_write_nothing_creates_no_file(tmp_path):
+    target = tmp_path / "out.csv"
+    assert helper.write_csv_file([], target) is None
+    assert not target.exists()
 
 
-def test_write_never_overwrites():
-    with tempfile.TemporaryDirectory() as d:
-        target = os.path.join(d, "out.csv")
-        helper.write_csv_file(ROWS, target)
-        _raises(FileExistsError, helper.write_csv_file, ROWS[:1], target)
-        assert len(pd.read_csv(target)) == 3  # original untouched
+def test_write_replaces_an_existing_file(tmp_path):
+    target = tmp_path / "out.csv"
+    helper.write_csv_file(ROWS, target)
+    helper.write_csv_file(ROWS[:1], target)
+    assert len(pd.read_csv(target)) == 1  # the new content replaced the old
+    assert [f.name for f in tmp_path.iterdir()] == [
+        "out.csv"
+    ]  # no temporary file left behind
 
 
-def test_write_failure_raises():
-    with tempfile.TemporaryDirectory() as d:
-        blocker = _write(d, "a_file", "x")  # a file where a folder is needed
-        _raises(OSError, helper.write_csv_file, ROWS, os.path.join(blocker, "out.csv"))
+def test_failed_write_keeps_the_old_file_and_leaves_no_temp_file(tmp_path, monkeypatch):
+    target = tmp_path / "out.csv"
+    helper.write_csv_file(ROWS, target)
+
+    def fail(self, *args, **kwargs):
+        raise OSError("disk full")
+
+    with monkeypatch.context() as m:
+        m.setattr(pd.DataFrame, "to_csv", fail)
+        with pytest.raises(OSError, match="disk full"):
+            helper.write_csv_file(ROWS[:1], target)
+    assert len(pd.read_csv(target)) == 3  # the old file is untouched
+    assert [f.name for f in tmp_path.iterdir()] == ["out.csv"]
+
+
+def test_write_failure_raises(make_csv):
+    blocker = make_csv("a_file", "x")  # a file where a folder is needed
+    with pytest.raises(OSError):
+        helper.write_csv_file(ROWS, blocker / "out.csv")
 
 
 # ---- logging
-def test_import_does_not_configure_logging():
+def test_import_does_not_configure_logging(tmp_path):
     code = "import logging, ema_scheduler_redcap.ema_helper; assert not logging.getLogger().handlers, logging.getLogger().handlers"
     r = subprocess.run(
         [sys.executable, "-c", code],
-        cwd=HERE,
+        cwd=tmp_path,
         capture_output=True,
         text=True,
         check=False,
     )
     assert r.returncode == 0, r.stderr
-
-
-if __name__ == "__main__":
-    tests = [
-        (n, f)
-        for n, f in sorted(globals().items())
-        if n.startswith("test_") and callable(f)
-    ]
-    for name, fn in tests:
-        fn()
-        print(f"ok  {name}")
-    print(f"{len(tests)} passed")

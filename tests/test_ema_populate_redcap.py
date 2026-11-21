@@ -1,4 +1,4 @@
-#!/usr/env/bin python
+#!/usr/bin/env python
 
 """
 These tests use their own config, tests/test_config.yaml, not the project's real
@@ -8,10 +8,10 @@ and only checks that it has everything the code needs.
 """
 
 import copy
-import os
+import logging
 import random
-import tempfile
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -19,13 +19,14 @@ import yaml
 
 from ema_scheduler_redcap import ema_populate_redcap as p
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-REAL_CONFIG = os.path.join(HERE, "../config/ema_config.yaml")
-TEST_CONFIG_FILE = os.path.join(HERE, "../config/test_config.yaml")
-TODAY = date(2026, 11, 2)
+CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
+REAL_CONFIG = CONFIG_DIR / "ema_config.yaml"
+TEST_CONFIG_FILE = CONFIG_DIR / "test_config.yaml"
+TODAY = date(
+    2026, 11, 17
+)  # the 'current' date passed to the code; every test date below is relative to it
 
-with open(TEST_CONFIG_FILE) as f:
-    TEST_CONFIG = yaml.safe_load(f)
+TEST_CONFIG = yaml.safe_load(TEST_CONFIG_FILE.read_text())
 
 # ---- everything below comes from test_config.yaml, so renaming a column there is enough
 DEFAULTS = TEST_CONFIG["defaults"]
@@ -42,6 +43,16 @@ INT_DATE, POST_DATE = (
 )
 INT_DAYS, POST_DAYS = (TEST_CONFIG["events"][e]["days"] for e in (INT, POST))
 SAMPLES, WINDOW = DEFAULTS["samples_per_day"], DEFAULTS["sampling_min"]
+MAX_BEFORE, MAX_AFTER = (
+    DEFAULTS["max_days_before_start"],
+    DEFAULTS["max_days_after_start"],
+)
+INT_OFFSET = TEST_CONFIG["events"][INT].get(
+    "start_offset_days", DEFAULTS["start_offset_days"]
+)
+POST_OFFSET = TEST_CONFIG["events"][POST].get(
+    "start_offset_days", DEFAULTS["start_offset_days"]
+)
 STANDARD = [
     "redcap_event_name",
     "redcap_repeat_instrument",
@@ -99,6 +110,22 @@ _f = next(
 FAILS_FILTER = {_f["field"]: str(_f["value"]) + "_not"}
 
 
+@pytest.fixture(autouse=True)
+def _seed_random():
+    """Same random schedules on every run, for every test."""
+    random.seed(0)
+
+
+def int_on(days):
+    """The start-date value (rand_date) that makes the int event start `days` from TODAY."""
+    return (TODAY + timedelta(days=days - INT_OFFSET)).isoformat()
+
+
+def post_on(days):
+    """The start-date value that makes the post event start `days` from TODAY."""
+    return (TODAY + timedelta(days=days - POST_OFFSET)).isoformat()
+
+
 def scr(rows):
     base = {c: "" for c in COLS}
     return pd.DataFrame([{**base, **OK, **r} for r in rows], columns=COLS)
@@ -108,54 +135,72 @@ def write_config(d):
     """Write the test config into folder d, adding per-event EMA file names."""
     cfg = copy.deepcopy(TEST_CONFIG)
     for name, ev in cfg["events"].items():
-        ev["ema_csv"] = f"ema_{name}.csv"
-    path = os.path.join(d, "cfg.yaml")
-    with open(path, "w") as f:
-        yaml.safe_dump(cfg, f)
+        ev["ema_csv"] = f"ema_{name}.csv"  # a bare name: found next to scr.csv
+    path = d / "cfg.yaml"
+    path.write_text(yaml.safe_dump(cfg))
     return path
 
 
-def run(scr_df, ema=None, first_run=False, today=TODAY):
-    """ema: {event_name: csv text}; events not listed get no EMA file. Returns {event_name: import DataFrame}."""
-    with tempfile.TemporaryDirectory() as d:
-        cfg_path, s = write_config(d), os.path.join(d, "scr.csv")
+@pytest.fixture
+def run(tmp_path_factory):
+    """run(scr_df, ema=None, today=TODAY) -> {event_name: import DataFrame}.
+
+    ema: {event_name: csv text}; events not listed get no EMA file.
+    Every call gets its own fresh folder, so a test can call it more than once.
+    """
+
+    def _run(scr_df, ema=None, today=TODAY):
+        d = tmp_path_factory.mktemp("run")
+        cfg_path, s = write_config(d), d / "scr.csv"
         for name, text in (ema or {}).items():
-            with open(os.path.join(d, f"ema_{name}.csv"), "w") as f:
-                f.write(text)
+            (d / f"ema_{name}.csv").write_text(text)
         scr_df.to_csv(s, index=False)
-        out = os.path.join(d, "out")
-        os.mkdir(out)
-        written = p.main(s, cfg_path, out_dir=out, first_run=first_run, today=today)
+        out = d / "out"
+        out.mkdir()
+        written = p.main(s, cfg_path, out, today=today)
         return {
             name: pd.read_csv(path, dtype=str, na_filter=False)
             for name, path in written.items()
         }
 
-
-def first_time(df, today=TODAY, seed=7):
-    random.seed(seed)
-    out = run(df, first_run=True, today=today)[INT]
-    return pd.to_datetime(out[SAMPLE_TIME]).min()
+    return _run
 
 
-def test_schedules_only_people_inside_the_window():
-    random.seed(1)
-    df = scr(
-        [
-            {ID: "1", INT_DATE: "2026-11-01"},  # start 11-02 (today): in window
-            {ID: "2", INT_DATE: "2026-11-04"},  # start 11-05: 3 days away, ok
-            {ID: "3", INT_DATE: "2026-11-05"},  # start 11-06: 4 days away, too early
-            {ID: "4", INT_DATE: "2026-10-31"},  # start 11-01: already passed
-            {ID: "5", INT_DATE: ""},  # no start date
-            {ID: "6", INT_DATE: "not a date"},  # bad data, skipped not fatal
-            {ID: "7", INT_DATE: "2026-11-01 14:30", **FAILS_FILTER},  # filtered out
-        ]
-    )
-    outs = run(df, first_run=True)
-    assert list(outs) == [
-        INT
-    ]  # one file per event, only for events with something to schedule
-    out = outs[INT]
+@pytest.fixture
+def first_time(run):
+    """first_time(df, today=TODAY, seed=7) -> earliest sample time written for the int event."""
+
+    def _first_time(df, today=TODAY, seed=7):
+        random.seed(seed)
+        return pd.to_datetime(run(df, today=today)[INT][SAMPLE_TIME]).min()
+
+    return _first_time
+
+
+@pytest.mark.parametrize(
+    ("row", "scheduled"),
+    [
+        pytest.param({INT_DATE: int_on(0)}, True, id="starts-today"),
+        pytest.param({INT_DATE: int_on(MAX_BEFORE)}, True, id="furthest-allowed-day"),
+        pytest.param({INT_DATE: int_on(MAX_BEFORE + 1)}, False, id="one-day-too-early"),
+        pytest.param({INT_DATE: int_on(-MAX_AFTER - 1)}, False, id="one-day-too-late"),
+        pytest.param({INT_DATE: ""}, False, id="no-start-date"),
+        pytest.param({INT_DATE: "not a date"}, False, id="unreadable-start-date"),
+        pytest.param(
+            {INT_DATE: int_on(0) + " 14:30", **FAILS_FILTER}, False, id="fails-a-filter"
+        ),
+    ],
+)
+def test_who_is_scheduled(run, row, scheduled):
+    outs = run(scr([{ID: "1", **row}]))
+    assert list(outs) == (
+        [INT] if scheduled else []
+    )  # one file per event, only if something was scheduled
+
+
+def test_schedule_content(run):
+    df = scr([{ID: "1", INT_DATE: int_on(0)}, {ID: "2", INT_DATE: int_on(MAX_BEFORE)}])
+    out = run(df)[INT]
     assert sorted(set(out[ID])) == ["1", "2"]
     assert set(out["redcap_event_name"]) == {INT}
     assert len(out) == 2 * INT_DAYS * SAMPLES
@@ -166,9 +211,9 @@ def test_schedules_only_people_inside_the_window():
     one = out[out[ID] == "1"]
     assert set(one[DAY_NUM]) == {str(i) for i in range(1, INT_DAYS + 1)}
     assert list(one["redcap_repeat_instance"][:3]) == ["1", "2", "3"]
-    first_start = datetime(
-        2026, 11, 2, 8
-    )  # start date + offset, at the 08:00 start time
+    first_start = datetime.combine(TODAY, datetime.min.time()) + timedelta(
+        hours=8
+    )  # start day, at the 08:00 start time
     last_day_start = first_start + timedelta(days=INT_DAYS - 1)
     assert one[SAMPLE_TIME].min() >= first_start.strftime("%Y-%m-%d %H:%M:%S")
     assert one[SAMPLE_TIME].max() < (
@@ -176,20 +221,19 @@ def test_schedules_only_people_inside_the_window():
     ).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def test_offset_zero_events_and_per_event_scheduling():
-    random.seed(2)
-    df = scr([{ID: "1", POST_DATE: "2026-11-02", INT_DATE: "2026-11-01"}])
+def test_offset_zero_events_and_per_event_scheduling(run):
+    df = scr([{ID: "1", POST_DATE: post_on(0), INT_DATE: int_on(0)}])
     ema = {
         INT: EMA_HEADER + f"1,{INT},,\n",  # any row for the event counts
         POST: EMA_HEADER,
     }
     outs = run(df, ema)  # already has int; should get only post (offset 0)
     assert list(outs) == [POST] and len(outs[POST]) == POST_DAYS * SAMPLES
-    assert outs[POST][SAMPLE_TIME].min() >= "2026-11-02 08:00:00"
+    assert outs[POST][SAMPLE_TIME].min() >= f"{TODAY} 08:00:00"
 
 
-def test_eastern_is_one_hour_earlier_than_central_in_redcap_time():
-    row = {ID: "1", INT_DATE: "2026-11-01"}
+def test_eastern_is_one_hour_earlier_than_central_in_redcap_time(first_time):
+    row = {ID: "1", INT_DATE: int_on(0)}
     central, eastern = (
         first_time(scr([row])),
         first_time(scr([{**row, TZ_FIELD: EASTERN}])),
@@ -197,40 +241,65 @@ def test_eastern_is_one_hour_earlier_than_central_in_redcap_time():
     assert central - eastern == pd.Timedelta(hours=1)  # Eastern 8am is Central 7am
 
 
-def test_state_without_dst_does_not_follow_its_zone_in_summer():
-    row = {ID: "1", INT_DATE: "2026-06-30", TZ_FIELD: str(OVERRIDE["zone_code"])}
-    summer = date(2026, 7, 1)
+def test_state_without_dst_does_not_follow_its_zone_in_summer(first_time):
+    summer = date(
+        2026, 7, 1
+    )  # a summer day, so Denver is on daylight time and Phoenix is not
+    row = {
+        ID: "1",
+        INT_DATE: (summer - timedelta(days=INT_OFFSET)).isoformat(),
+        TZ_FIELD: str(OVERRIDE["zone_code"]),
+    }
     with_dst = first_time(scr([{**row, STATE_FIELD: "CO"}]), summer)
     without_dst = first_time(scr([{**row, STATE_FIELD: OVERRIDE["state"]}]), summer)
     assert without_dst - with_dst == pd.Timedelta(
         hours=1
     )  # in summer Phoenix is an hour behind Denver
-    winter = {**row, INT_DATE: "2026-11-01"}
+    winter = {**row, INT_DATE: int_on(0)}  # TODAY must be a winter date for this check
     assert first_time(scr([{**winter, STATE_FIELD: OVERRIDE["state"]}])) == first_time(
         scr([{**winter, STATE_FIELD: "CO"}])
     )
 
 
-def test_blank_or_unknown_time_zone_is_skipped():
+@pytest.mark.parametrize("zone", ["", "999"], ids=["blank", "unknown"])
+def test_blank_or_unknown_time_zone_is_skipped(run, zone):
     rows = [
-        {ID: str(i), INT_DATE: "2026-11-01", TZ_FIELD: z}
-        for i, z in enumerate(("", "999"), 1)
+        {ID: "1", INT_DATE: int_on(0), TZ_FIELD: zone},
+        {ID: "2", INT_DATE: int_on(0)},
     ]
-    rows.append({ID: "3", INT_DATE: "2026-11-01"})
-    out = run(scr(rows), first_run=True)[INT]
-    assert set(out[ID]) == {"3"}
+    out = run(scr(rows))[INT]
+    assert set(out[ID]) == {"2"}
 
 
-def test_nothing_to_schedule_writes_no_file():
-    assert run(scr([{ID: "1"}]), first_run=True) == {}
+def test_nothing_to_schedule_writes_no_file(run):
+    assert run(scr([{ID: "1"}])) == {}
 
 
-def test_missing_ema_file_raises_without_first_run():
-    with pytest.raises(FileNotFoundError):
-        run(scr([{ID: "1"}]))
+def test_missing_ema_file_warns_and_counts_as_nobody_scheduled(run, caplog):
+    caplog.set_level(logging.WARNING)
+    df = scr([{ID: "1", POST_DATE: post_on(0), INT_DATE: int_on(0)}])
+    ema = {
+        INT: EMA_HEADER + f"1,{INT},,1\n"
+    }  # int is running (1 already scheduled); post has no file yet
+    outs = run(df, ema)
+    assert list(outs) == [
+        POST
+    ]  # post is scheduled without its file; int is read normally
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert (
+        len(warnings) == 1
+        and "EMA file missing or empty" in warnings[0]
+        and f"ema_{POST}.csv" in warnings[0]
+    )
 
 
-def test_ema_file_holding_another_event_raises():
+def test_empty_ema_file_with_only_a_header_does_not_warn(run, caplog):
+    caplog.set_level(logging.WARNING)
+    run(scr([{ID: "1", INT_DATE: int_on(0)}]), {INT: EMA_HEADER, POST: EMA_HEADER})
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
+
+def test_ema_file_holding_another_event_raises(run):
     ema = {
         INT: EMA_HEADER,
         POST: EMA_HEADER + f"1,{INT},,1\n",
@@ -239,9 +308,8 @@ def test_ema_file_holding_another_event_raises():
         run(scr([{ID: "1"}]), ema)
 
 
-def test_load_config_merges_defaults_into_each_event():
-    with tempfile.TemporaryDirectory() as d:
-        cfg = p.load_config(write_config(d))
+def test_load_config_merges_defaults_into_each_event(tmp_path):
+    cfg = p.load_config(write_config(tmp_path))
     assert list(cfg["events"]) == [INT, POST]
     intv, post = cfg["events"][INT], cfg["events"][POST]
     assert intv["start_offset_days"] == DEFAULTS["start_offset_days"]  # inherited
@@ -267,10 +335,12 @@ def test_load_config_merges_defaults_into_each_event():
     )
 
 
-def test_participant_zone_uses_state_override():
-    with tempfile.TemporaryDirectory() as d:
-        cfg = p.load_config(write_config(d))
-    row = lambda code, state: {TZ_FIELD: code, STATE_FIELD: state}
+def test_participant_zone_uses_state_override(tmp_path):
+    cfg = p.load_config(write_config(tmp_path))
+
+    def row(code, state):
+        return {TZ_FIELD: code, STATE_FIELD: state}
+
     assert p.participant_zone(row(MOUNTAIN, "CO"), cfg) == "America/Denver"
     assert (
         p.participant_zone(row(MOUNTAIN, OVERRIDE["state"].lower()), cfg)
@@ -284,7 +354,9 @@ def test_participant_zone_uses_state_override():
 
 
 def test_to_central_in_winter_and_summer():
-    local = lambda y, m, d, hh: datetime(y, m, d, hh)
+    def local(y, m, d, hh):
+        return datetime(y, m, d, hh)
+
     assert p.to_central(
         local(2026, 11, 3, 8), "America/New_York", "America/Chicago"
     ) == local(2026, 11, 3, 7)
@@ -296,26 +368,27 @@ def test_to_central_in_winter_and_summer():
     ) == local(2026, 11, 3, 9)
 
 
-def test_dry_run_writes_nothing():
-    with tempfile.TemporaryDirectory() as d:
-        cfg_path, s_path = write_config(d), os.path.join(d, "scr.csv")
-        scr([{ID: "1", INT_DATE: "2026-11-01"}]).to_csv(s_path, index=False)
-        out = os.path.join(d, "out")
-        assert p.main(s_path, cfg_path, out_dir=out, first_run=True, dry_run=True, today=TODAY) == {}
-        assert not os.path.exists(os.path.join(d, "out"))
+def test_dry_run_writes_nothing(tmp_path):
+    cfg_path, s_path, out = (
+        write_config(tmp_path),
+        tmp_path / "scr.csv",
+        tmp_path / "out",
+    )
+    scr([{ID: "1", INT_DATE: int_on(0)}]).to_csv(s_path, index=False)
+    assert p.main(s_path, cfg_path, out, dry_run=True, today=TODAY) == {}
+    assert not out.exists()
 
 
-def test_missing_output_folder_raises():
-    with tempfile.TemporaryDirectory() as d:
-        cfg_path, s_path = write_config(d), os.path.join(d, "scr.csv")
-        scr([{ID: "1", INT_DATE: "2026-11-01"}]).to_csv(s_path, index=False)
-        with pytest.raises(NotADirectoryError):
-            p.main(s_path, cfg_path, os.path.join(d, "nope"), first_run=True, today=TODAY)
+def test_missing_output_folder_raises(tmp_path):
+    cfg_path, s_path = write_config(tmp_path), tmp_path / "scr.csv"
+    scr([{ID: "1", INT_DATE: int_on(0)}]).to_csv(s_path, index=False)
+    with pytest.raises(NotADirectoryError):
+        p.main(s_path, cfg_path, tmp_path / "nope", today=TODAY)
 
 
 def test_real_config_has_everything_the_code_needs():
     """Checks only that the project's real config loads and is complete; not what its values are."""
-    if not os.path.exists(REAL_CONFIG):
+    if not REAL_CONFIG.exists():
         pytest.skip(f"no real config at {REAL_CONFIG}")
     cfg = p.load_config(REAL_CONFIG)  # raises KeyError naming a missing top-level key
     assert cfg["events"], "no events in the config"
@@ -338,15 +411,3 @@ def test_real_config_has_everything_the_code_needs():
     }
     for name, ev in cfg["events"].items():
         assert not needed - set(ev), f"{name} is missing {sorted(needed - set(ev))}"
-
-
-if __name__ == "__main__":
-    tests = [
-        (n, f)
-        for n, f in sorted(globals().items())
-        if n.startswith("test_") and callable(f)
-    ]
-    for name, fn in tests:
-        fn()
-        print(f"ok  {name}")
-    print(f"{len(tests)} passed")
