@@ -11,7 +11,7 @@ dependencies = [
     "docopt-ng>=0.9.0",
     "pandas>=3.0.6",
     "pyyaml>=6.0.3",
-    "redcap-toolbox @ https://github.com/uwmadison-chm/redcap-toolbox/archive/181ab58765afffd1584e3d41f1998d238b57a536.zip",
+    "redcap-toolbox>=2026.10.26",
 ]
 license = "MIT"
 authors = [
@@ -34,6 +34,11 @@ classifiers = [
 [project.scripts]
 ema-populate = "ema_scheduler_redcap.ema_populate_redcap:cli"
 ema-gen = "ema_scheduler_redcap.ema_gen:cli"
+
+[project.urls]
+url="https://github.com/uwmadison-chm/ema-scheduler-redcap"
+issues="https://github.com/uwmadison-chm/ema-scheduler-redcap/issues"
+
 
 [dependency-groups]
 dev = [
