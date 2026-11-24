@@ -37,7 +37,11 @@ TZ_FIELD, STATE_FIELD, START_TIME = (
     TEST_CONFIG["state_field"],
     DEFAULTS["start_time_field"],
 )
-INT, POST = list(TEST_CONFIG["events"])
+EVENTS = list(
+    TEST_CONFIG["events"]
+)  # every event in the test config; the tests below use these two
+INT, POST = "int_ema_arm_1", "post_ema_arm_1"
+assert {INT, POST} <= set(EVENTS), f"test_config.yaml needs events {INT} and {POST}"
 INT_DATE, POST_DATE = (
     TEST_CONFIG["events"][e]["start_date_field"] for e in (INT, POST)
 )
@@ -279,8 +283,9 @@ def test_missing_ema_file_warns_and_counts_as_nobody_scheduled(run, caplog):
     caplog.set_level(logging.WARNING)
     df = scr([{ID: "1", POST_DATE: post_on(0), INT_DATE: int_on(0)}])
     ema = {
-        INT: EMA_HEADER + f"1,{INT},,1\n"
-    }  # int is running (1 already scheduled); post has no file yet
+        name: EMA_HEADER for name in EVENTS if name != POST
+    }  # every event has a file except post
+    ema[INT] = EMA_HEADER + f"1,{INT},,1\n"  # int is running (1 already scheduled)
     outs = run(df, ema)
     assert list(outs) == [
         POST
@@ -295,7 +300,7 @@ def test_missing_ema_file_warns_and_counts_as_nobody_scheduled(run, caplog):
 
 def test_empty_ema_file_with_only_a_header_does_not_warn(run, caplog):
     caplog.set_level(logging.WARNING)
-    run(scr([{ID: "1", INT_DATE: int_on(0)}]), {INT: EMA_HEADER, POST: EMA_HEADER})
+    run(scr([{ID: "1", INT_DATE: int_on(0)}]), {name: EMA_HEADER for name in EVENTS})
     assert not [r for r in caplog.records if r.levelno == logging.WARNING]
 
 
@@ -310,7 +315,7 @@ def test_ema_file_holding_another_event_raises(run):
 
 def test_load_config_merges_defaults_into_each_event(tmp_path):
     cfg = p.load_config(write_config(tmp_path))
-    assert list(cfg["events"]) == [INT, POST]
+    assert {INT, POST} <= set(cfg["events"])
     intv, post = cfg["events"][INT], cfg["events"][POST]
     assert intv["start_offset_days"] == DEFAULTS["start_offset_days"]  # inherited
     assert (
@@ -377,6 +382,52 @@ def test_dry_run_writes_nothing(tmp_path):
     scr([{ID: "1", INT_DATE: int_on(0)}]).to_csv(s_path, index=False)
     assert p.main(s_path, cfg_path, out, dry_run=True, today=TODAY) == {}
     assert not out.exists()
+
+
+def test_missing_ema_file_is_saved_as_a_template_with_only_the_column_names(tmp_path):
+    cfg_path, s_path, out = (
+        write_config(tmp_path),
+        tmp_path / "scr.csv",
+        tmp_path / "out",
+    )
+    out.mkdir()
+    scr([{ID: "1", INT_DATE: int_on(0)}]).to_csv(s_path, index=False)
+    p.main(s_path, cfg_path, out, today=TODAY)
+    expected = [
+        ID,
+        "redcap_event_name",
+        "redcap_repeat_instrument",
+        "redcap_repeat_instance",
+        SAMPLE_TIME,
+        TEST_CONFIG["defaults"]["day_field"],
+    ]
+    for name in EVENTS:
+        text = (
+            tmp_path / f"ema_{name}.csv"
+        ).read_text()  # saved next to the screening file
+        assert text == ",".join(expected) + "\n"
+
+
+def test_existing_ema_file_is_never_replaced_by_the_template(tmp_path):
+    cfg_path, s_path, out = (
+        write_config(tmp_path),
+        tmp_path / "scr.csv",
+        tmp_path / "out",
+    )
+    out.mkdir()
+    ema = tmp_path / f"ema_{INT}.csv"
+    text = EMA_HEADER + f"1,{INT},,1\n"
+    ema.write_text(text)
+    scr([{ID: "2", INT_DATE: int_on(0)}]).to_csv(s_path, index=False)
+    p.main(s_path, cfg_path, out, today=TODAY)
+    assert ema.read_text() == text
+
+
+def test_dry_run_saves_no_template(tmp_path):
+    cfg_path, s_path = write_config(tmp_path), tmp_path / "scr.csv"
+    scr([{ID: "1", INT_DATE: int_on(0)}]).to_csv(s_path, index=False)
+    p.main(s_path, cfg_path, tmp_path / "out", dry_run=True, today=TODAY)
+    assert not [f for f in tmp_path.iterdir() if f.name.startswith("ema_")]
 
 
 def test_missing_output_folder_raises(tmp_path):

@@ -8,15 +8,16 @@ one REDCap import CSV per event, ready to upload with update_redcap. Each event'
 EMA file is looked for in the same folder as the screening CSV; the file names
 are in the config. Output directory is expected to exist.
 
-If an event's EMA file is missing or empty, a warning is logged and nobody is
-treated as already scheduled for that event.
+If an event's EMA file is missing or empty, a warning is logged, an empty template
+(column names only) is saved at that path, and nobody is treated as already scheduled
+for that event.
 
 For each event, a participant is scheduled if they pass the filters, have a
 start date, are not already in that event's EMA file, and the start date
 (start date field + offset) is inside the allowed window.
 
 Usage:
-  ema-populate [options] <scr_csv> <config_yaml> <output_dir>
+  populate_redcap_ema.py [options] <scr_csv> <config_yaml> <output_dir>
 
 Options:
   --dry-run           Say what would be scheduled; write nothing
@@ -192,8 +193,6 @@ def main(scr_csv, cfg_yaml, out_dir, dry_run=False, today=None):
 
     cfg = load_config(cfg_yaml)
     id_field = cfg["id_field"]
-    file_names = {name: output_name(ev) for name, ev in cfg["events"].items()}
-
     scr_df = read_csv_file(scr_csv)
 
     rows_by_event = {}
@@ -208,10 +207,20 @@ def main(scr_csv, cfg_yaml, out_dir, dry_run=False, today=None):
             },
             "scr",
         )
+
         # EMA input files are assumed to have the same scr file path
         ema_path = Path(scr_csv).parent / ev["ema_csv"]
-        # a missing or empty file logs a warning and counts as "nobody scheduled yet"
-        ema_df = read_ema_csv(ema_path, id_field)
+        # a missing or empty file logs a warning, is saved as a header-only template,
+        # and counts as "nobody scheduled yet"
+        ema_columns = [
+            id_field,
+            EVENT_FIELD,
+            "redcap_repeat_instrument",
+            "redcap_repeat_instance",
+            cfg["sample_time_field"],
+            ev["day_field"],
+        ]
+        ema_df = read_ema_csv(ema_path, ema_columns, write_template=not dry_run)
         done = already_scheduled_ids(ema_df, name, id_field)
         other = sorted(set(ema_df[EVENT_FIELD]) - {name})
         if other:
@@ -233,6 +242,8 @@ def main(scr_csv, cfg_yaml, out_dir, dry_run=False, today=None):
             + ", ".join(f"{n} {len(r)} rows" for n, r in rows_by_event.items())
         )
         return written
+
+    file_names = {name: output_name(ev) for name, ev in cfg["events"].items()}
 
     for name, rows in rows_by_event.items():
         out = write_csv_file(rows, out_dir.joinpath(file_names[name]))

@@ -21,27 +21,45 @@ def read_csv_file(path: str | Path) -> pd.DataFrame:
     return pd.read_csv(path, dtype=str, na_filter=False)
 
 
-def read_ema_csv(path: str | Path, id_field: str) -> pd.DataFrame:
+def read_ema_csv(
+    path: str | Path, columns: list[str], write_template: bool = True
+) -> pd.DataFrame:
     """
     Read the EMA data. A missing or empty file is treated as "nobody scheduled yet",
     with a warning (look for "EMA file missing or empty" in the log). Note that on a
     running study this also happens if the file is lost, and everyone would then be
     scheduled again, so do check that warning.
+
+    In that case a template with only the column names is saved at `path`, so the
+    upload step has a file to compare against. Pass write_template=False to skip that
+    (a dry run). An existing file is never replaced unless it is empty (zero bytes).
     """
     try:
         return read_csv_file(path)
     except (FileNotFoundError, EmptyDataError):
+        empty = pd.DataFrame(columns=columns)
+        note = ""
+        if write_template:
+            _to_csv_atomic(empty, Path(path))
+            note = "; saved an empty template there"
         logger.warning(
-            f"EMA file missing or empty ({path}); assuming no one is scheduled yet for this event"
+            f"EMA file missing or empty ({path}); assuming no one is scheduled yet for this event{note}"
         )
-        return pd.DataFrame(
-            columns=[
-                id_field,
-                "redcap_event_name",
-                "redcap_repeat_instrument",
-                "redcap_repeat_instance",
-            ]
-        )
+        return empty
+
+
+def _to_csv_atomic(df: pd.DataFrame, path: Path) -> None:
+    """Write df to "<name>.tmp" and rename it over `path`, so a crash never leaves half a file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(
+        path.name + ".tmp"
+    )  # ends in .tmp, so a "*.csv" search never picks it up
+    try:
+        df.to_csv(tmp, index=False)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def write_csv_file(rows: pd.DataFrame | list[dict], path: str | Path) -> Path | None:
@@ -55,14 +73,5 @@ def write_csv_file(rows: pd.DataFrame | list[dict], path: str | Path) -> Path | 
     if df.empty:
         return None
     path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(
-        path.name + ".tmp"
-    )  # ends in .tmp, so a "*.csv" search never picks it up
-    try:
-        df.to_csv(tmp, index=False)
-        os.replace(tmp, path)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
+    _to_csv_atomic(df, path)
     return path

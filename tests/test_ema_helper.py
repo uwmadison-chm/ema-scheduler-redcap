@@ -18,6 +18,8 @@ EMA_COLS = [
     "redcap_event_name",
     "redcap_repeat_instrument",
     "redcap_repeat_instance",
+    "ema_deliver_at",
+    "ema_day_num",
 ]
 ROWS = [
     {
@@ -88,7 +90,7 @@ def test_ema_missing_or_empty_gives_an_empty_frame_and_a_warning(
     if text is not None:  # None means the file does not exist
         path.write_text(text)
     with caplog.at_level(logging.WARNING, logger=helper.logger.name):
-        df = helper.read_ema_csv(path, "webscreen_id")
+        df = helper.read_ema_csv(path, EMA_COLS)
     assert df.empty and list(df.columns) == EMA_COLS
     # the selection code sees it as "nobody scheduled yet"
     assert sel.already_scheduled_ids(df, "int_ema_arm_1", "webscreen_id") == set()
@@ -96,17 +98,56 @@ def test_ema_missing_or_empty_gives_an_empty_frame_and_a_warning(
     assert "EMA file missing or empty" in caplog.messages[0]
 
 
-def test_ema_unparsable_file_still_raises(make_csv):
-    with pytest.raises(ParserError):
-        helper.read_ema_csv(make_csv("bad.csv", MALFORMED), "webscreen_id")
+@pytest.mark.parametrize("text", [None, ""], ids=["missing", "empty"])
+def test_ema_missing_or_empty_saves_a_template_with_only_the_column_names(
+    tmp_path, text
+):
+    path = tmp_path / "ema.csv"
+    if text is not None:
+        path.write_text(text)
+    helper.read_ema_csv(path, EMA_COLS)
+    assert path.read_text() == ",".join(EMA_COLS) + "\n"  # header only, no rows
+    # the saved file reads back as an empty frame with the same columns, and no more warnings
+    back = helper.read_csv_file(path)
+    assert back.empty and list(back.columns) == EMA_COLS
+    assert [f.name for f in tmp_path.iterdir()] == [
+        "ema.csv"
+    ]  # no temporary file left behind
 
 
-def test_ema_file_with_data_is_read_without_a_warning(make_csv, caplog):
-    path = make_csv("a.csv", ",".join(EMA_COLS) + "\n1,int_ema_arm_1,,1\n")
+def test_ema_template_is_not_saved_when_asked_not_to(tmp_path):
+    path = tmp_path / "ema.csv"
+    df = helper.read_ema_csv(path, EMA_COLS, write_template=False)
+    assert df.empty and not path.exists()
+
+
+def test_ema_template_is_saved_after_the_warning_so_the_next_run_is_quiet(
+    tmp_path, caplog
+):
+    path = tmp_path / "ema.csv"
     with caplog.at_level(logging.WARNING, logger=helper.logger.name):
-        df = helper.read_ema_csv(path, "webscreen_id")
+        helper.read_ema_csv(path, EMA_COLS)  # first run: warns and saves the template
+        assert len(caplog.records) == 1
+        caplog.clear()
+        helper.read_ema_csv(path, EMA_COLS)  # next run: the file is there, no warning
+    assert not caplog.records
+
+
+def test_ema_unparsable_file_still_raises_and_is_left_alone(make_csv):
+    path = make_csv("bad.csv", MALFORMED)
+    with pytest.raises(ParserError):
+        helper.read_ema_csv(path, EMA_COLS)
+    assert path.read_text() == MALFORMED
+
+
+def test_ema_file_with_data_is_read_without_a_warning_or_a_rewrite(make_csv, caplog):
+    text = ",".join(EMA_COLS) + "\n1,int_ema_arm_1,,1,2026-11-02 08:00:00,1\n"
+    path = make_csv("a.csv", text)
+    with caplog.at_level(logging.WARNING, logger=helper.logger.name):
+        df = helper.read_ema_csv(path, EMA_COLS)
     assert len(df) == 1
     assert not caplog.records
+    assert path.read_text() == text
 
 
 # ---- writing

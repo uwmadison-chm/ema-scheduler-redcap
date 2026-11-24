@@ -4,7 +4,7 @@ build-backend = "uv_build"
 
 [project]
 name = "ema-scheduler-redcap"
-version = "2026.11.20"
+version = "2026.11.23"
 description = "An EMA scheduler meant to setup scheduler for REDCap integration"
 requires-python = ">=3.11"
 dependencies = [
@@ -47,6 +47,7 @@ dev = [
     "ruff>=0.12.2",
     "rust-just>=1.53.0",
     "ty>=0.0.2",
+    "twine>=7.0.0",
 ]
 
 [tool.pytest]
